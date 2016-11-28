@@ -94,6 +94,7 @@ package errors
 import (
 	"fmt"
 	"io"
+	"strings"
 )
 
 // New returns an error with the supplied message.
@@ -242,7 +243,23 @@ func (w *withMessage) Format(s fmt.State, verb rune) {
 	}
 }
 
-// Cause returns the underlying cause of the error, if possible.
+// Traverse traverses the error chain, calling f on each error until f returns
+// true  or the chain ends.
+func Traverse(err error, f func(error) ([]error, bool)) {
+	next := []error{err}
+
+	for len(next) > 0 {
+		err = next[0]
+		more, cont := f(err)
+		if !cont {
+			break
+		}
+		next = append(next[1:], more...)
+	}
+}
+
+// DirectCause returns the direct cause of the error, if possible.
+//
 // An error value has a cause if it implements the following
 // interface:
 //
@@ -250,20 +267,109 @@ func (w *withMessage) Format(s fmt.State, verb rune) {
 //            Cause() error
 //     }
 //
+// If the error doesn't implement Cause, nil wil be returned.
+func DirectCause(err error) error {
+	type causer interface {
+		Cause() error
+	}
+	cause, ok := err.(causer)
+	if !ok {
+		return nil
+	}
+
+	return cause.Cause()
+}
+
+// Cause returns the underlying cause of the error, if possible.
+// Cause uses DirectCause as the cause source.
+//
 // If the error does not implement Cause, the original error will
 // be returned. If the error is nil, nil will be returned without further
 // investigation.
 func Cause(err error) error {
+	Traverse(err, func(next error) ([]error, bool) {
+		cause := DirectCause(err)
+		if cause == nil {
+			return nil, false
+		}
+		err = cause
+		return []error{err}, true
+	})
+
+	return err
+}
+
+type withCauses struct {
+	causes []error
+}
+
+func (w *withCauses) Error() string {
+	messages := make([]string, len(w.causes))
+	for i, cause := range w.Causes() {
+		messages[i] = cause.Error()
+	}
+
+	return strings.Join(messages, ", ")
+}
+
+func (w *withCauses) Causes() []error { return append([]error{}, w.causes...) }
+
+func (w *withCauses) Format(s fmt.State, verb rune) {
+	switch verb {
+	case 'v':
+		if s.Flag('+') {
+			for _, cause := range w.Causes() {
+				fmt.Fprintf(s, "%+v\n", cause)
+			}
+
+			return
+		}
+		fallthrough
+	case 's', 'q':
+		io.WriteString(s, w.Error())
+	}
+}
+
+// WithCauses returns an error that wraps a series of other errors.
+// This does *not* implement Cause(), because there's no single obvious way
+// to pick a specific cause.
+func WithCauses(errs ...error) error {
+	return &withCauses{
+		causes: append([]error{}, errs...),
+	}
+}
+
+// DirectCauses returns the direct causes of the error, if possible.
+//
+// An error has causes if its implements either the causer or the following
+// interface:
+//
+//     type multiCauser interface {
+//            Causes() []error
+//     }
+//
+// If the error's cause doesn't implement either, the
+// result will be nil
+func DirectCauses(err error) []error {
+	type multiCauser interface {
+		Causes() []error
+	}
 	type causer interface {
 		Cause() error
 	}
-
-	for err != nil {
+	causes, ok := err.(multiCauser)
+	if !ok {
 		cause, ok := err.(causer)
 		if !ok {
-			break
+			return nil
 		}
-		err = cause.Cause()
+		return []error{cause.Cause()}
 	}
-	return err
+
+	return causes.Causes()
+}
+
+// Causes returns the causes of the error's cause, if possible.
+func Causes(err error) []error {
+	return DirectCauses(Cause(err))
 }

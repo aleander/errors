@@ -223,3 +223,80 @@ func TestErrorEquality(t *testing.T) {
 		}
 	}
 }
+
+func TestTraverse(t *testing.T) {
+	tests := []struct {
+		err  error
+		test func(error) bool
+		want error
+	}{
+		{
+			// nil error is nil
+			err:  nil,
+			test: func(error) bool { return true },
+			want: nil,
+		},
+		{
+			err: WithMessage(io.EOF, "Thing"),
+			test: func(err error) bool {
+				return DirectCause(err) == io.EOF
+			},
+			want: WithMessage(io.EOF, "Thing"),
+		},
+	}
+
+	for i, tt := range tests {
+		var got error
+		Traverse(tt.err, func(err error) ([]error, bool) {
+			if tt.test(err) {
+				got = err
+				return nil, false
+			}
+			cause := DirectCause(err)
+			if cause == nil {
+				return nil, false
+			}
+			return []error{cause}, true
+		})
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("test %d: got %#+v, want %#+v", i+1, got, tt.want)
+		}
+	}
+}
+
+func TestTraverseMultiple(t *testing.T) {
+	tests := []struct {
+		err     error
+		visitor func(err error) ([]error, bool)
+		want    []error
+	}{
+		{
+			err:     WithMessage(WithCauses(io.EOF, io.ErrNoProgress), "Wrapper"),
+			visitor: func(err error) ([]error, bool) { return Causes(err), true },
+			want: []error{
+				WithMessage(WithCauses(io.EOF, io.ErrNoProgress), "Wrapper"),
+				io.EOF, io.ErrNoProgress,
+			},
+		},
+		{
+			err:     WithMessage(WithCauses(io.EOF, io.ErrNoProgress), "Wrapper"),
+			visitor: func(err error) ([]error, bool) { return DirectCauses(err), true },
+			want: []error{
+				WithMessage(WithCauses(io.EOF, io.ErrNoProgress), "Wrapper"),
+				WithCauses(io.EOF, io.ErrNoProgress),
+				io.EOF, io.ErrNoProgress,
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		visited := []error{}
+		Traverse(tt.err, func(err error) ([]error, bool) {
+			visited = append(visited, err)
+			return tt.visitor(err)
+		})
+		if !reflect.DeepEqual(visited, tt.want) {
+			t.Errorf("test %d: got %#v, want %#v", i, visited, tt.want)
+		}
+	}
+}
